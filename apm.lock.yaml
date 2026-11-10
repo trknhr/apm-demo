@@ -1,0 +1,35 @@
+lockfile_version: '1'
+apm_version: 0.35.0
+dependencies:
+- repo_url: trknhr/shared-skills
+  name: shared-skills
+  host: github.com
+  resolved_commit: 5e5c776b1dde0645f1bc970bb34541f315a67907
+  resolved_ref: v1.0.0
+  version: 1.0.0
+  package_type: apm_package
+  deployed_files:
+  - .claude/skills/pr-description
+  - .claude/skills/pr-description/SKILL.md
+  deployed_file_hashes:
+    .claude/skills/pr-description/SKILL.md: sha256:173f220b63abb6cc35dbf8797f56e8edfaf4bf641d71bf9ebdf5bf5767dd413c
+  content_hash: sha256:3b8ba8786f041448329c01521ad81d9c65596e847e5f32025517f8d491c87d5a
+deployments:
+- kind: project-relative
+  target: claude
+  value: .claude/skills/pr-description
+  runtime: null
+  scope: project
+  owners:
+  - trknhr/shared-skills
+  active_owner: trknhr/shared-skills
+  content_hash: null
+- kind: project-relative
+  target: claude
+  value: .claude/skills/pr-description/SKILL.md
+  runtime: null
+  scope: project
+  owners:
+  - trknhr/shared-skills
+  active_owner: trknhr/shared-skills
+  content_hash: sha256:173f220b63abb6cc35dbf8797f56e8edfaf4bf641d71bf9ebdf5bf5767dd413c

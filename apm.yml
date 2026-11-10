@@ -1,0 +1,9 @@
+name: apm-demo
+version: 1.0.0
+description: End-to-end Dependabot APM update experiment
+author: trknhr
+targets:
+  - claude
+dependencies:
+  apm:
+    - trknhr/shared-skills#v1.0.0
