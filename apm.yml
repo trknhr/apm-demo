@@ -6,4 +6,4 @@ targets:
   - claude
 dependencies:
   apm:
-    - trknhr/shared-skills#v1.0.0
+    - trknhr/shared-skills#v1.1.0
