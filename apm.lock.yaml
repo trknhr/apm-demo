@@ -1,5 +1,5 @@
 lockfile_version: '1'
-apm_version: 0.34.0
+apm_version: 0.35.0
 dependencies:
 - repo_url: trknhr/shared-skills
   name: shared-skills
@@ -12,7 +12,7 @@ dependencies:
   - .claude/skills/pr-description
   - .claude/skills/pr-description/SKILL.md
   deployed_file_hashes:
-    .claude/skills/pr-description/SKILL.md: sha256:173f220b63abb6cc35dbf8797f56e8edfaf4bf641d71bf9ebdf5bf5767dd413c
+    .claude/skills/pr-description/SKILL.md: sha256:2d5a698fa4e6d35ae535dc7a1c77841622dd50ff7fe2bdf2584ce86dea2abcd7
   content_hash: sha256:4f140598b2447b255d34eb66116bfaeb6c484babbd18b30897841759642d7414
 deployments:
 - kind: project-relative
@@ -32,4 +32,4 @@ deployments:
   owners:
   - trknhr/shared-skills
   active_owner: trknhr/shared-skills
-  content_hash: sha256:173f220b63abb6cc35dbf8797f56e8edfaf4bf641d71bf9ebdf5bf5767dd413c
+  content_hash: sha256:2d5a698fa4e6d35ae535dc7a1c77841622dd50ff7fe2bdf2584ce86dea2abcd7
