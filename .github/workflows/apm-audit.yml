@@ -1,6 +1,12 @@
 name: APM audit
 
 on:
+  workflow_dispatch:
+    inputs:
+      expected_sha:
+        description: Commit that must be audited
+        required: true
+        type: string
   pull_request:
   push:
     branches: [main]
@@ -13,6 +19,11 @@ jobs:
     name: Audit committed Skill deployment
     runs-on: ubuntu-latest
     steps:
+      - name: Verify dispatched commit
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+        run: test "$GITHUB_SHA" = "$EXPECTED_SHA"
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false

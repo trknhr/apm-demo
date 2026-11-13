@@ -1,0 +1,156 @@
+name: Redeploy Dependabot APM Skill
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: apm-redeploy-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
+
+jobs:
+  generate:
+    if: >-
+      github.event.pull_request.user.id == 49699333 &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      startsWith(github.event.pull_request.head.ref, 'dependabot/apm/') &&
+      github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - name: Validate the fixture PR
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          python3 - <<'PY'
+          import json, os, re, urllib.request
+          from pathlib import Path
+          url = f"https://api.github.com/repos/{os.environ['GITHUB_REPOSITORY']}/pulls/{os.environ['PR_NUMBER']}/files?per_page=100"
+          req = urllib.request.Request(url, headers={"Authorization": "Bearer " + os.environ['GH_TOKEN']})
+          files = json.load(urllib.request.urlopen(req))
+          assert 0 < len(files) < 100
+          assert {f['filename'] for f in files} <= {'apm.yml', 'apm.lock.yaml'}, 'Unexpected PR files'
+          manifest = Path('apm.yml').read_text()
+          # This automation intentionally supports only this public demonstration fixture.
+          normalized = re.sub(r'trknhr/shared-skills#v\d+\.\d+\.\d+', 'trknhr/shared-skills#VERSION', manifest)
+          expected = '''name: apm-demo
+          version: 1.0.0
+          description: End-to-end Dependabot APM update experiment
+          author: trknhr
+          targets:
+            - claude
+          dependencies:
+            apm:
+              - trknhr/shared-skills#VERSION
+          '''
+          assert normalized == expected, 'Unsupported manifest'
+          PY
+      - uses: microsoft/apm-action@d723bb64ed70c135bbaf87d126b721dd2dae0439 # v1
+        with:
+          apm-version: '0.35.0'
+          setup-only: true
+      - name: Generate in a clean deployment directory
+        run: apm install --no-trust-bin --root "$RUNNER_TEMP/apm-generated"
+      - name: Prepare the allowed files and audit them
+        run: |
+          python3 - <<'PY'
+          import json, os, shutil, subprocess
+          from pathlib import Path
+          root = Path(os.environ['RUNNER_TEMP']) / 'apm-generated'
+          paths = ['apm.lock.yaml', '.claude/skills/pr-description/SKILL.md']
+          files = {}
+          for name in paths:
+              source = root / name
+              assert source.is_file() and not source.is_symlink()
+              files[name] = source.read_text()
+              shutil.copyfile(source, name)
+          assert sum(len(v.encode()) for v in files.values()) < 100000
+          Path('deployment.json').write_text(json.dumps({
+              'base_sha': subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip(),
+              'files': files,
+          }))
+          PY
+          apm audit --ci
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: apm-deployment
+          path: deployment.json
+          retention-days: 7
+
+  commit:
+    needs: generate
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: read
+      actions: write
+    steps:
+      # No checkout or dependency execution in the write-capable job.
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: apm-deployment
+          path: artifact
+      - name: Commit only generated files and dispatch audit for the new SHA
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          EXPECTED_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          python3 - <<'PY'
+          import base64, json, os, re, urllib.parse, urllib.request
+          from pathlib import Path
+          repo = os.environ['GITHUB_REPOSITORY']
+          base = f'https://api.github.com/repos/{repo}'
+          def api(path, data=None, method=None):
+              req = urllib.request.Request(base + path,
+                  data=None if data is None else json.dumps(data).encode(),
+                  headers={'Authorization': 'Bearer ' + os.environ['GH_TOKEN'],
+                           'Accept': 'application/vnd.github+json'}, method=method)
+              with urllib.request.urlopen(req) as response:
+                  body = response.read()
+                  return json.loads(body) if body else None
+          artifact = Path('artifact/deployment.json')
+          assert artifact.is_file() and not artifact.is_symlink() and artifact.stat().st_size < 100000
+          payload = json.loads(artifact.read_text())
+          assert set(payload) == {'base_sha', 'files'}
+          expected = os.environ['EXPECTED_SHA']
+          assert payload['base_sha'] == expected and re.fullmatch(r'[a-f0-9]{40}', expected)
+          allowed = {'apm.lock.yaml', '.claude/skills/pr-description/SKILL.md'}
+          assert set(payload['files']) == allowed
+          assert all(isinstance(v, str) for v in payload['files'].values())
+          pr = api('/pulls/' + os.environ['PR_NUMBER'])
+          assert pr['state'] == 'open' and pr['user']['id'] == 49699333
+          assert pr['head']['repo']['full_name'] == repo and pr['head']['sha'] == expected
+          branch = pr['head']['ref']
+          assert branch.startswith('dependabot/apm/')
+          changes = []
+          for path, content in payload['files'].items():
+              old = api('/contents/' + urllib.parse.quote(path, safe='/') + '?ref=' + expected)
+              if base64.b64decode(old['content']).decode() != content:
+                  changes.append({'path': path, 'mode': '100644', 'type': 'blob', 'content': content})
+          sha = expected
+          if changes:
+              parent = api('/git/commits/' + expected)
+              tree = api('/git/trees', {'base_tree': parent['tree']['sha'], 'tree': changes})
+              commit = api('/git/commits', {
+                  'message': 'chore: redeploy APM Skill after Dependabot update',
+                  'tree': tree['sha'], 'parents': [expected],
+                  'author': {'name': 'github-actions[bot]', 'email': '41898282+github-actions[bot]@users.noreply.github.com'},
+              })
+              sha = commit['sha']
+              api('/git/refs/heads/' + urllib.parse.quote(branch, safe='/'), {'sha': sha, 'force': False}, 'PATCH')
+          # Explicit dispatch avoids relying on a GITHUB_TOKEN push to trigger CI.
+          api('/actions/workflows/apm-audit.yml/dispatches', {
+              'ref': branch, 'inputs': {'expected_sha': sha},
+          })
+          print('Auditing updated PR commit:', sha)
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as summary:
+              summary.write(f'Generated files committed to PR #{pr["number"]}.\n\nAuditing `{sha}` via workflow_dispatch.\n')
+          PY
