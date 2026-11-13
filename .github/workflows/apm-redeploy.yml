@@ -2,32 +2,74 @@ name: Redeploy Dependabot APM Skill
 
 on:
   pull_request:
-    types: [opened, synchronize, reopened]
+    types: [opened, reopened]
+  push:
+    branches: ["dependabot/apm/**"]
 
 permissions:
   contents: read
+  pull-requests: read
 
 concurrency:
-  group: apm-redeploy-${{ github.event.pull_request.number }}
+  group: apm-redeploy-${{ github.head_ref || github.ref_name }}
   cancel-in-progress: false
 
 jobs:
   generate:
     if: >-
-      github.event.pull_request.user.id == 49699333 &&
-      github.event.pull_request.head.repo.full_name == github.repository &&
-      startsWith(github.event.pull_request.head.ref, 'dependabot/apm/') &&
-      github.actor != 'github-actions[bot]'
+      (github.event_name == 'pull_request' &&
+       github.event.pull_request.user.id == 49699333 &&
+       github.event.pull_request.head.repo.full_name == github.repository &&
+       startsWith(github.event.pull_request.head.ref, 'dependabot/apm/')) ||
+      (github.event_name == 'push' && github.actor == 'dependabot[bot]')
+    outputs:
+      pr_number: ${{ steps.pr.outputs.number }}
+      sha: ${{ steps.pr.outputs.sha }}
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          ref: ${{ github.event.pull_request.head.sha }}
-          persist-credentials: false
-      - name: Validate the fixture PR
+      - name: Identify the current Dependabot PR
+        id: pr
         env:
           GH_TOKEN: ${{ github.token }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          python3 - <<'PYIDENTIFY'
+          import json, os, urllib.parse, urllib.request
+          repo = os.environ['GITHUB_REPOSITORY']
+          event = json.load(open(os.environ['GITHUB_EVENT_PATH']))
+          if os.environ['GITHUB_EVENT_NAME'] == 'pull_request':
+              number = event['pull_request']['number']
+              expected = event['pull_request']['head']['sha']
+              path = f'/pulls/{number}'
+          else:
+              branch = event['ref'].removeprefix('refs/heads/')
+              expected = event['after']
+              head = urllib.parse.quote(repo.split('/')[0] + ':' + branch, safe='')
+              path = '/pulls?state=open&head=' + head
+          req = urllib.request.Request('https://api.github.com/repos/' + repo + path,
+              headers={'Authorization': 'Bearer ' + os.environ['GH_TOKEN']})
+          result = json.load(urllib.request.urlopen(req))
+          pr = result[0] if isinstance(result, list) and len(result) == 1 else result
+          if not isinstance(pr, dict) or pr.get('state') != 'open':
+              raise SystemExit(0)
+          if pr['head']['sha'] != expected:
+              print('PR head moved; skipping stale event')
+              raise SystemExit(0)
+          assert pr['user']['id'] == 49699333
+          assert pr['head']['repo']['full_name'] == repo
+          assert pr['head']['ref'].startswith('dependabot/apm/')
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as out:
+              out.write(f'number={pr["number"]}\nsha={expected}\n')
+          PYIDENTIFY
+      - if: steps.pr.outputs.sha != ''
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ steps.pr.outputs.sha }}
+          persist-credentials: false
+      - if: steps.pr.outputs.sha != ''
+        name: Validate the fixture PR
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ steps.pr.outputs.number }}
         run: |
           python3 - <<'PY'
           import json, os, re, urllib.request
@@ -36,7 +78,7 @@ jobs:
           req = urllib.request.Request(url, headers={"Authorization": "Bearer " + os.environ['GH_TOKEN']})
           files = json.load(urllib.request.urlopen(req))
           assert 0 < len(files) < 100
-          assert {f['filename'] for f in files} <= {'apm.yml', 'apm.lock.yaml'}, 'Unexpected PR files'
+          assert {f['filename'] for f in files} <= {'apm.yml', 'apm.lock.yaml', '.claude/skills/pr-description/SKILL.md'}, 'Unexpected PR files'
           manifest = Path('apm.yml').read_text()
           # This automation intentionally supports only this public demonstration fixture.
           normalized = re.sub(r'trknhr/shared-skills#v\d+\.\d+\.\d+', 'trknhr/shared-skills#VERSION', manifest)
@@ -52,13 +94,16 @@ jobs:
           '''
           assert normalized == expected, 'Unsupported manifest'
           PY
-      - uses: microsoft/apm-action@d723bb64ed70c135bbaf87d126b721dd2dae0439 # v1
+      - if: steps.pr.outputs.sha != ''
+        uses: microsoft/apm-action@d723bb64ed70c135bbaf87d126b721dd2dae0439 # v1
         with:
           apm-version: '0.35.0'
           setup-only: true
-      - name: Generate in a clean deployment directory
+      - if: steps.pr.outputs.sha != ''
+        name: Generate in a clean deployment directory
         run: apm install --no-trust-bin --root "$RUNNER_TEMP/apm-generated"
-      - name: Prepare the allowed files and audit them
+      - if: steps.pr.outputs.sha != ''
+        name: Prepare the allowed files and audit them
         run: |
           python3 - <<'PY'
           import json, os, shutil, subprocess
@@ -78,7 +123,8 @@ jobs:
           }))
           PY
           apm audit --ci
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - if: steps.pr.outputs.sha != ''
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: apm-deployment
           path: deployment.json
@@ -86,6 +132,7 @@ jobs:
 
   commit:
     needs: generate
+    if: needs.generate.outputs.sha != ''
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -100,8 +147,8 @@ jobs:
       - name: Commit only generated files and dispatch audit for the new SHA
         env:
           GH_TOKEN: ${{ github.token }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-          EXPECTED_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_NUMBER: ${{ needs.generate.outputs.pr_number }}
+          EXPECTED_SHA: ${{ needs.generate.outputs.sha }}
         run: |
           python3 - <<'PY'
           import base64, json, os, re, urllib.parse, urllib.request
