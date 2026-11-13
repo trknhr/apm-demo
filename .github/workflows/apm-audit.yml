@@ -7,9 +7,8 @@ on:
         description: Commit that must be audited
         required: true
         type: string
-  pull_request:
   push:
-    branches: [main]
+    branches: ["**"]
 
 permissions:
   contents: read
@@ -33,3 +32,36 @@ jobs:
           setup-only: true
       - name: Check committed deployment without rewriting it
         run: apm audit --ci
+
+  report:
+    needs: audit
+    if: always() && github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    permissions:
+      statuses: write
+    steps:
+      - name: Report the exact audited commit to the PR
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+          AUDIT_RESULT: ${{ needs.audit.result }}
+        run: |
+          python3 - <<'PY'
+          import json, os, urllib.request
+          sha = os.environ['EXPECTED_SHA']
+          assert sha == os.environ['GITHUB_SHA']
+          repo = os.environ['GITHUB_REPOSITORY']
+          result = os.environ['AUDIT_RESULT']
+          body = {
+              'state': 'success' if result == 'success' else 'failure',
+              'context': 'APM deployment audit',
+              'description': 'Audit of the updated PR commit: ' + result,
+              'target_url': f'https://github.com/{repo}/actions/runs/{os.environ["GITHUB_RUN_ID"]}',
+          }
+          req = urllib.request.Request(f'https://api.github.com/repos/{repo}/statuses/{sha}',
+              data=json.dumps(body).encode(),
+              headers={'Authorization': 'Bearer ' + os.environ['GH_TOKEN']})
+          with urllib.request.urlopen(req) as response:
+              assert response.status == 201
+          print('Reported', body['state'], 'for', sha)
+          PY
